@@ -23,6 +23,7 @@ interface TreeDataItem {
   onClick?: () => void;
   draggable?: boolean;
   droppable?: boolean;
+  parent?: TreeDataItem;
 }
 
 type TreeProps = React.HTMLAttributes<HTMLDivElement> & {
@@ -53,6 +54,123 @@ const TreeView = React.forwardRef<HTMLDivElement, TreeProps>(
     const [selectedItemId, setSelectedItemId] = React.useState<string | undefined>(
       initialSelectedItemId,
     );
+    const [expandedItems, setExpandedItems] = React.useState<string[]>([]);
+
+    const processedData = React.useMemo(() => {
+      const processItems = (
+        items: TreeDataItem[] | TreeDataItem,
+        parent?: TreeDataItem,
+      ): TreeDataItem[] | TreeDataItem => {
+        if (items instanceof Array) {
+          return items.map((item) => {
+            const newItem = { ...item, parent };
+            if (item.children) {
+              newItem.children = processItems(item.children, newItem) as TreeDataItem[];
+            }
+            return newItem;
+          });
+        } else {
+          const newItem = { ...items, parent };
+          if (items.children) {
+            newItem.children = processItems(items.children, newItem) as TreeDataItem[];
+          }
+          return newItem;
+        }
+      };
+      return processItems(data);
+    }, [data]);
+
+    const flatNodePointers: Record<string, TreeDataItem> = React.useMemo(() => {
+      const flatData: Record<string, TreeDataItem> = {};
+
+      const flattenTree = (items: TreeDataItem[] | TreeDataItem) => {
+        if (items instanceof Array) {
+          items.forEach((item) => flattenTree(item));
+        } else {
+          flatData[items.id] = items;
+          if (items.children) {
+            flattenTree(items.children);
+          }
+        }
+      };
+      flattenTree(processedData);
+      return flatData;
+    }, [processedData]);
+
+    const handleToggleExpand = (itemId: string, isExpanded: boolean) => {
+      setExpandedItems((prev) => {
+        if (isExpanded) {
+          return [...prev, itemId];
+        } else {
+          return prev.filter((id) => id !== itemId);
+        }
+      });
+    };
+
+    const handleTreeKeyboardNavigation = (e: React.KeyboardEvent) => {
+      if (!selectedItemId) return;
+
+      const currentNode = flatNodePointers[selectedItemId];
+      if (!currentNode) return;
+
+      const allNodes: TreeDataItem[] = [];
+      const collectNodes = (items: TreeDataItem[] | TreeDataItem) => {
+        if (items instanceof Array) {
+          items.forEach((item) => {
+            allNodes.push(item);
+            if (item.children && expandedItems.includes(item.id)) {
+              collectNodes(item.children);
+            }
+          });
+        } else {
+          allNodes.push(items);
+          if (items.children && expandedItems.includes(items.id)) {
+            collectNodes(items.children);
+          }
+        }
+      };
+      collectNodes(processedData);
+
+      const currentIndex = allNodes.findIndex((node) => node.id === selectedItemId);
+      if (currentIndex === -1) return;
+
+      switch (e.key) {
+        case 'ArrowDown': {
+          if (currentIndex < allNodes.length - 1) {
+            handleSelectChange(allNodes[currentIndex + 1]);
+          }
+          e.preventDefault();
+          break;
+        }
+        case 'ArrowUp': {
+          if (currentIndex > 0) {
+            handleSelectChange(allNodes[currentIndex - 1]);
+          }
+          e.preventDefault();
+          break;
+        }
+        case 'ArrowRight': {
+          if (currentNode.children && currentNode.children.length > 0) {
+            if (!expandedItems.includes(currentNode.id)) {
+              handleToggleExpand(currentNode.id, true);
+            } else {
+              handleSelectChange(currentNode.children[0]);
+            }
+          }
+          e.preventDefault();
+          break;
+        }
+        case 'ArrowLeft': {
+          if (expandedItems.includes(currentNode.id)) {
+            handleToggleExpand(currentNode.id, false);
+          } else if (currentNode.parent) {
+            handleSelectChange(currentNode.parent);
+          }
+          e.preventDefault();
+          break;
+        }
+      }
+    };
 
     const [draggedItem, setDraggedItem] = React.useState<TreeDataItem | null>(null);
 
@@ -80,51 +198,57 @@ const TreeView = React.forwardRef<HTMLDivElement, TreeProps>(
       [draggedItem, onDocumentDrag],
     );
 
-    const expandedItemIds = React.useMemo(() => {
-      if (!initialSelectedItemId) {
-        return [] as string[];
-      }
+    React.useEffect(() => {
+      if (!initialSelectedItemId || expandAll) return;
 
       const ids: string[] = [];
-
-      function walkTreeItems(items: TreeDataItem[] | TreeDataItem, targetId: string) {
+      const walkTreeItems = (items: TreeDataItem[] | TreeDataItem, targetId: string): boolean => {
         if (items instanceof Array) {
           for (let i = 0; i < items.length; i++) {
-            ids.push(items[i]!.id);
-            if (walkTreeItems(items[i]!, targetId) && !expandAll) {
+            if (walkTreeItems(items[i]!, targetId)) {
+              ids.push(items[i]!.id);
               return true;
             }
-            if (!expandAll) ids.pop();
           }
-        } else if (!expandAll && items.id === targetId) {
+          return false;
+        } else if (items.id === targetId) {
           return true;
         } else if (items.children) {
-          return walkTreeItems(items.children, targetId);
+          if (walkTreeItems(items.children, targetId)) {
+            ids.push(items.id);
+            return true;
+          }
         }
-      }
+        return false;
+      };
 
-      walkTreeItems(data, initialSelectedItemId);
-      return ids;
-    }, [data, expandAll, initialSelectedItemId]);
+      walkTreeItems(processedData, initialSelectedItemId);
+      if (ids.length > 0) {
+        setExpandedItems(ids);
+      }
+    }, [initialSelectedItemId, processedData, expandAll]);
 
     return (
       <div className={cn('overflow-hidden relative p-2', className)}>
         <TreeItem
-          data={data}
+          data={processedData}
           ref={ref}
           selectedItemId={selectedItemId}
           handleSelectChange={handleSelectChange}
-          expandedItemIds={expandedItemIds}
+          expandedItems={expandedItems}
+          handleToggleExpand={handleToggleExpand}
           defaultLeafIcon={defaultLeafIcon}
           defaultNodeIcon={defaultNodeIcon}
           handleDragStart={handleDragStart}
           handleDrop={handleDrop}
           draggedItem={draggedItem}
+          onKeyDown={handleTreeKeyboardNavigation}
           {...props}
         />
         <div
           className="w-full h-[48px]"
           onDrop={(e) => {
+            e.preventDefault();
             handleDrop({ id: '', name: 'parent_div' });
           }}
         ></div>
@@ -137,7 +261,8 @@ TreeView.displayName = 'TreeView';
 type TreeItemProps = TreeProps & {
   selectedItemId?: string;
   handleSelectChange: (item: TreeDataItem | undefined) => void;
-  expandedItemIds: string[];
+  expandedItems: string[];
+  handleToggleExpand: (itemId: string, isExpanded: boolean) => void;
   defaultNodeIcon?: any;
   defaultLeafIcon?: any;
   handleDragStart?: (item: TreeDataItem) => void;
@@ -152,7 +277,8 @@ const TreeItem = React.forwardRef<HTMLDivElement, TreeItemProps>(
       data,
       selectedItemId,
       handleSelectChange,
-      expandedItemIds,
+      expandedItems,
+      handleToggleExpand,
       defaultNodeIcon,
       defaultLeafIcon,
       handleDragStart,
@@ -166,7 +292,7 @@ const TreeItem = React.forwardRef<HTMLDivElement, TreeItemProps>(
       data = [data];
     }
     return (
-      <div ref={ref} role="tree" className={className} {...props}>
+      <div ref={ref} role="tree" className={className} {...props} tabIndex={0}>
         <ul>
           {data.map((item) => (
             <li key={item.id}>
@@ -174,7 +300,8 @@ const TreeItem = React.forwardRef<HTMLDivElement, TreeItemProps>(
                 <TreeNode
                   item={item}
                   selectedItemId={selectedItemId}
-                  expandedItemIds={expandedItemIds}
+                  expandedItems={expandedItems}
+                  handleToggleExpand={handleToggleExpand}
                   handleSelectChange={handleSelectChange}
                   defaultNodeIcon={defaultNodeIcon}
                   defaultLeafIcon={defaultLeafIcon}
@@ -205,7 +332,8 @@ TreeItem.displayName = 'TreeItem';
 const TreeNode = ({
   item,
   handleSelectChange,
-  expandedItemIds,
+  expandedItems,
+  handleToggleExpand: handleNodeToggleExpand,
   selectedItemId,
   defaultNodeIcon,
   defaultLeafIcon,
@@ -215,7 +343,8 @@ const TreeNode = ({
 }: {
   item: TreeDataItem;
   handleSelectChange: (item: TreeDataItem | undefined) => void;
-  expandedItemIds: string[];
+  expandedItems: string[];
+  handleToggleExpand: (itemId: string, isExpanded: boolean) => void;
   selectedItemId?: string;
   defaultNodeIcon?: any;
   defaultLeafIcon?: any;
@@ -223,8 +352,22 @@ const TreeNode = ({
   handleDrop?: (item: TreeDataItem) => void;
   draggedItem: TreeDataItem | null;
 }) => {
-  const [value, setValue] = React.useState(expandedItemIds.includes(item.id) ? [item.id] : []);
+  const isExpanded = expandedItems.includes(item.id);
+  const [value, setValue] = React.useState(isExpanded ? [item.id] : []);
   const [isDragOver, setIsDragOver] = React.useState(false);
+
+  React.useEffect(() => {
+    const newValue = expandedItems.includes(item.id) ? [item.id] : [];
+    setValue(newValue);
+  }, [expandedItems, item.id]);
+
+  const syncExpandCollapseState = (values: string[]) => {
+    setValue(values);
+    const newIsExpanded = values.includes(item.id);
+    if (newIsExpanded !== isExpanded) {
+      handleNodeToggleExpand(item.id, newIsExpanded);
+    }
+  };
 
   const onDragStart = (e: React.DragEvent) => {
     if (!item.draggable) {
@@ -253,7 +396,7 @@ const TreeNode = ({
   };
 
   return (
-    <AccordionPrimitive.Root type="multiple" value={value} onValueChange={(s) => setValue(s)}>
+    <AccordionPrimitive.Root type="multiple" value={value} onValueChange={syncExpandCollapseState}>
       <AccordionPrimitive.Item value={item.id}>
         <AccordionTrigger
           className={cn(
@@ -285,7 +428,8 @@ const TreeNode = ({
             data={item.children ? item.children : item}
             selectedItemId={selectedItemId}
             handleSelectChange={handleSelectChange}
-            expandedItemIds={expandedItemIds}
+            expandedItems={expandedItems}
+            handleToggleExpand={handleNodeToggleExpand}
             defaultLeafIcon={defaultLeafIcon}
             defaultNodeIcon={defaultNodeIcon}
             handleDragStart={handleDragStart}
